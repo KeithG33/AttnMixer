@@ -4,7 +4,7 @@ Implements a mixer-style architecture from the paper [MLP-Mixer: An all-MLP Arch
 ## Architecture
 The Attn-Mixer block consists of two attention blocks and an MLP. Similar to the MLP-Mixer, there is a channel attention and a token attention where the token attention is computed by tranposing the features and treating the tokens as the sequence. 
 
-To this end, we use a 1Dd relative-position attention for the tokens, and a 2d relative-position attention for the spatial channels to induce some inductive bias.
+To this end, we use a 1D relative-position attention for the tokens, and a 2D relative-position attention for the spatial channels to induce some inductive bias.
 
 ```python
 # Pseudo-code for SGU block as used in SGU ChessBot
