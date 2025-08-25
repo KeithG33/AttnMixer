@@ -8,7 +8,7 @@ To this end, we use a 1D relative-position attention for the tokens, and a 2D re
 
 ```python
 # Pseudo-code for SGU block as used in SGU ChessBot
-def mixer_attn_block(x):
+def attn_mixer_block(x):
   x = x + tok_attn(x.T).T # 1d relpos
   x = x + seq_attn(x) # 2d relpos
   x = x + mlp(x)
