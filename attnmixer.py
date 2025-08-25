@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from timm.layers import DropPath, PatchEmbed
+from attention import AttentionBlock, RelPosBias1D, RelPosBias2D, ChannelCovBias
 
 
 # Fixed sinusoidal positional encoding for 2D inputs
@@ -53,135 +54,17 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class AttentionBlock(nn.Module):
-    """Multi-head self-attention module with optional 1D or 2D relative position bias.
-
-    Using timm Swin Transformer implementation as a reference for the 2d relative position bias. And
-    uses a 1D relative position bias for the transposed attention in the mixer block.
-    """
-
-    def __init__(
-        self,
-        seq_len,
-        embed_dim,
-        num_heads,
-        dropout=0.0,
-        use_2d_relative_position=True,
-        expansion_ratio=1.0,
-    ):
-        super().__init__()
-        self.num_heads = num_heads
-        self.dim = embed_dim
-        self.seq_len = seq_len
-        self.use_2d_relative_position = use_2d_relative_position
-        self.expanded_dim = int(embed_dim * expansion_ratio)
-        self.head_dim = self.expanded_dim // num_heads
-        assert (
-            self.head_dim * num_heads == self.expanded_dim
-        ), "expanded_dim must be divisible by num_heads"
-
-        self.scale = nn.Parameter(torch.ones(1, 1, seq_len, 1))
-        self.qkv_proj = nn.Linear(embed_dim, 3 * self.expanded_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.proj = nn.Linear(self.expanded_dim, embed_dim)
-
-        if self.use_2d_relative_position:
-            self.h, self.w = self.compute_grid_dimensions(seq_len)
-            self.relative_position_bias_table = nn.Parameter(
-                torch.zeros((2 * self.h - 1) * (2 * self.w - 1), num_heads)
-            )
-            self.register_buffer(
-                "relative_position_index",
-                self.get_2d_relative_position_index(self.h, self.w),
-            )
-            nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
-        else:
-            self.relative_position_bias_table = nn.Parameter(
-                torch.zeros(2 * seq_len - 1, num_heads)
-            )
-            self.register_buffer(
-                "relative_position_index", self.get_1d_relative_position_index(seq_len)
-            )
-            nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
-
-    def compute_grid_dimensions(self, n):
-        """
-        Compute grid dimensions (h, w) for 2D relative position bias. In our case, this will be the
-        height and width of the chess board (8x8).
-        """
-        root = int(math.sqrt(n))
-        for i in range(root, 0, -1):
-            if n % i == 0:
-                return (i, n // i)
-
-    def get_2d_relative_position_index(self, h, w):
-        """Create pairwise relative position index for 2D grid."""
-
-        coords = torch.stack(
-            torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
-        )  # 2, h, w
-        coords_flatten = coords.reshape(2, -1)  # 2, h*w
-        relative_coords = (
-            coords_flatten[:, :, None] - coords_flatten[:, None, :]
-        )  # 2, h*w, h*w
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # h*w, h*w, 2
-        relative_coords[:, :, 0] += h - 1  # Shift to start from 0
-        relative_coords[:, :, 1] += w - 1
-        relative_coords[:, :, 0] *= 2 * w - 1
-        relative_position_index = relative_coords.sum(-1)  # Shape: (h*w, h*w)
-        return relative_position_index  # h*w, h*w
-
-    def get_1d_relative_position_index(self, seq_len):
-        # Compute relative position indices for 1D sequences
-        coords = torch.arange(seq_len)
-        relative_coords = coords[None, :] - coords[:, None]  # seq_len, seq_len
-        relative_coords += seq_len - 1  # Shift to start from 0
-        return relative_coords  # seq_len, seq_len
-
-    def _get_rel_pos_bias(self):
-        """Retrieve relative position bias based on precomputed indices for the attention scores."""
-        # Retrieve and reshape the relative position bias
-        relative_position_bias = self.relative_position_bias_table[
-            self.relative_position_index.view(-1).long()
-        ]
-        relative_position_bias = relative_position_bias.view(
-            self.seq_len, self.seq_len, -1
-        )  # seq_len, seq_len, num_heads
-        relative_position_bias = relative_position_bias.permute(
-            2, 0, 1
-        ).contiguous()  # num_heads, seq_len, seq_len
-        return relative_position_bias.unsqueeze(0)  # 1, num_heads, seq_len, seq_len
-
-    def forward(self, x):
-        B, N, C = x.shape
-
-        qkv = self.qkv_proj(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0) 
-
-        relative_position_bias = self._get_rel_pos_bias() # 1, H, N, N
-        attn = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=relative_position_bias,
-        )
-        attn = self.scale * attn
-        x = attn.transpose(1, 2).reshape(B, N, self.expanded_dim) 
-        x = self.proj(x) 
-        x = self.dropout(x)
-        return x
-
-
 class MixerBlock(nn.Module):
-    def __init__(self, num_patches, embed_dim, num_heads=16, dropout=0.0, drop_path=0.0):
+    def __init__(self, num_patches, embed_dim, num_heads=16, dropout=0.0):
         super().__init__()
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.num_patches = num_patches
         self.seq_mixing_norm = nn.LayerNorm(embed_dim)
         self.seq_mixing_attn = AttentionBlock(
             num_patches,
             embed_dim,
             num_heads,
-            dropout=0,
-            use_2d_relative_position=True,
+            # use_2d_relative_position=True,
+            bias_module=RelPosBias2D(num_patches, num_heads),
             expansion_ratio=1.25,
         )
         self.token_mixing_norm = nn.LayerNorm(embed_dim)
@@ -189,9 +72,9 @@ class MixerBlock(nn.Module):
             embed_dim,
             num_patches,
             7,
-            dropout=0,
-            use_2d_relative_position=False,
-            expansion_ratio=1.0,
+            # use_2d_relative_position=False,
+            bias_module=ChannelCovBias(7),
+            expansion_ratio=1.25,
         )
 
         self.mlp = ResidualBlock(
@@ -200,8 +83,8 @@ class MixerBlock(nn.Module):
 
     def forward(self, x):
         # x shape: (B, 64, piece_embed)
-        x = x + self.drop_path(self.token_mixing_attn(self.token_mixing_norm(x).transpose(1, 2)).transpose(1, 2))
-        x = x + self.drop_path(self.seq_mixing_attn(self.seq_mixing_norm(x)))
+        x = x + self.token_mixing_attn(self.token_mixing_norm(x).transpose(1, 2)).transpose(1, 2)
+        x = x + self.seq_mixing_attn(self.seq_mixing_norm(x))
         x = self.mlp(x)
         return x
 
@@ -217,13 +100,12 @@ class AttnMixer(nn.Module):
 
     def __init__(
         self,
-        num_classes,
+        num_classes=1000,
         img_size=(224, 224),
         patch_size=16,
-        patch_embed_dim=96,
+        patch_embed_dim=128,
         num_blocks=(2,2,6,2),
-        num_heads=(3,6,12,15),
-        dropout=(0.025, 0.05, 0.075, 0.1),
+        num_heads=(4,4,8,8),
         device='cuda',
     ):
         super().__init__()
@@ -233,12 +115,10 @@ class AttnMixer(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
-            in_chans=3,
             embed_dim=patch_embed_dim,
             norm_layer=nn.LayerNorm,
         )
         num_patches = self.patch_embed.num_patches
-        self.num_patches = num_patches
 
         # Position encoding
         pos_encoding = positionalencoding2d(
@@ -255,8 +135,7 @@ class AttnMixer(nn.Module):
                         num_patches,
                         patch_embed_dim,
                         num_heads=num_heads[i],
-                        dropout=dropout[i],
-                        drop_path=0.0,
+                        dropout=0,
                     )
                     for _ in range(num_blocks[i])
                 ]
