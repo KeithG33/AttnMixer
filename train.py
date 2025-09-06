@@ -19,7 +19,10 @@ from attnmixer import AttnMixer
 
 
 torch.backends.cudnn.benchmark = True
-
+# Ensure local model entrypoints are registered with timm
+import vitmixer  # noqa: F401
+import vitmixer_relpos  # noqa: F401
+import vit_pico  # noqa: F401
 
 class Trainer:
     def __init__(
@@ -32,6 +35,7 @@ class Trainer:
         log_every=50,
         wandb_name='IN1k-Training', 
         checkpoint_dir=None,
+        model_name: str = "vitmixer_pico_patch16_224",
     ):
         self.epochs = epochs
         self.batch_size = batch_size
@@ -90,10 +94,14 @@ class Trainer:
             # pin_memory=True,
         )
         
-        self.model = AttnMixer(
-            patch_embed_dim=128,
-            num_heads=(4,4,5,5)
-        )
+        # Create model by name via timm for consistent registration
+        # Examples:
+        #   - "vitmixer_pico_patch16_224" (local)
+        #   - "vitmixer_tiny_patch16_224" (local)
+        #   - "vit_pico_patch16_224" (local timm ViT baseline)
+        #   - any upstream timm model string
+        self.model = timm.create_model(model_name, pretrained=False, num_classes=n_classes)
+        print(f"Loaded model: {model_name}")
 
         # self.model = torch.compile(self.model)
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters())}")
@@ -141,7 +149,7 @@ class Trainer:
 
     def build_transforms(self):
         train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.75, 1.0)),
+            transforms.RandomResizedCrop(224, scale=(0.6, 1.0)),
             transforms.TrivialAugmentWide(),
             transforms.RandomHorizontalFlip(),
             transforms.RandomErasing(p=0.2, value='random', scale=(0.01, 0.2)),
@@ -272,11 +280,12 @@ class Trainer:
 # Example usage:
 if __name__ == '__main__':
     trainer = Trainer(
+        model_name='vitmixer_tiny_patch16_224',
         epochs=300,
-        batch_size=608,
-        lr=0.002, # ---> 0.000005
-        save_dir='./attn_mixer-b608-lr0.002',
+        batch_size=512,
+        lr=0.003,
+        save_dir='./vit-b1024-lr0.003',
         wandb_logging=False,  # set to True if you wish to log with wandb
-        wandb_name='attn_mixer-b608-lr0.002', # wandb name
+        wandb_name='vit-b1024-lr0.003', # wandb name
     )
     trainer.run_training()
